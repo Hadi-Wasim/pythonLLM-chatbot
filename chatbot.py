@@ -41,7 +41,7 @@ except ImportError:
 
 # ---------------- API KEY SETUP ----------------
 # 👇 PASTE YOUR KEY HERE IF NOT IN ENVIRONMENT VARIABLES
-API_KEY = "AIzaSyDfE6xuOSk0fzzESGWjcqW7-HhMMdDCr_I"
+API_KEY = ""
 
 if HAVE_GEMINI:
     genai.configure(api_key=API_KEY)
