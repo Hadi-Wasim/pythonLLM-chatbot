@@ -77,12 +77,86 @@ EMBEDDER = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
 RAG_STORE = {"chunks": [], "embeddings": None}  # (filename, text)
 
 def extract_text_from_pdf(file_path):
+    """Support both PDF and TXT files (most common use case)"""
     try:
-        reader = PdfReader(file_path)
-        return "\n".join(page.extract_text() or "" for page in reader.pages)
-    except Exception as e:
-        return f"Error reading PDF: {e}"
+        if os.path.getsize(file_path) == 0:
+            print(f"⚠️ Skipped {file_path}: File is empty.")
+            return None
+    except:
+        return None
 
+    _, ext = os.path.splitext(file_path.lower())
+    
+    if ext == ".pdf":
+        try:
+            reader = PdfReader(file_path)
+            text = "\n".join(page.extract_text() or "" for page in reader.pages)
+            if text.strip():
+                return text
+            else:
+                print(f"⚠️ PDF {file_path} extracted no text (possibly scanned/image-based).")
+                return None
+        except Exception as e:
+            print(f"❌ Failed to read PDF {file_path}: {e}")
+            return None
+            
+    elif ext in [".txt", ".md", ".csv", ".log", ""]:
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                text = f.read()
+            if text.strip():
+                return text
+            else:
+                print(f"⚠️ Text file {file_path} is empty.")
+                return None
+        except Exception as e:
+            print(f"❌ Failed to read text file {file_path}: {e}")
+            return None
+    else:
+        print(f"⚠️ Unsupported file type: {ext} → {file_path}")
+        return None
+
+def add_pdfs_to_rag(files):
+    if not files:
+        return "⚠️ No files uploaded."
+    
+    added = 0
+    new_chunks_text = []
+    new_chunks_meta = []
+
+    for file in files:
+        # Handle Gradio file objects properly
+        file_path = file.name if hasattr(file, "name") else file
+        
+        print(f"Processing: {file_path}")  # Debug line
+        
+        text = extract_text_from_pdf(file_path)
+        
+        if not text or not text.strip():
+            continue
+            
+        chunks = chunk_text(text)
+        base_name = os.path.basename(file_path)
+        for chk in chunks:
+            new_chunks_meta.append((base_name, chk))
+            new_chunks_text.append(chk)
+        added += len(chunks)
+    
+    if added > 0:
+        embeddings = EMBEDDER.encode(new_chunks_text, convert_to_tensor=False, show_progress_bar=True)
+        new_embs = np.array(embeddings)
+
+        RAG_STORE["chunks"].extend(new_chunks_meta)
+        
+        if RAG_STORE["embeddings"] is None:
+            RAG_STORE["embeddings"] = new_embs
+        else:
+            RAG_STORE["embeddings"] = np.vstack([RAG_STORE["embeddings"], new_embs])
+            
+        return f"✅ Loaded {len(files)} file(s) → {added} chunks | Total in memory: {len(RAG_STORE['chunks'])}"
+    else:
+        return "⚠️ No readable text found in uploaded files. Supported: PDF, TXT, MD"  
+      
 def chunk_text(text: str, chunk_size: int = 400, overlap: int = 50):
     words = text.split()
     chunks = []
@@ -94,35 +168,6 @@ def chunk_text(text: str, chunk_size: int = 400, overlap: int = 50):
         i += chunk_size - overlap
     return chunks
 
-def add_pdfs_to_rag(files):
-    if not files:
-        return "⚠️ No files uploaded."
-    
-    added = 0
-    new_chunks_text = []
-    new_chunks_meta = []
-
-    for file in files:
-        text = extract_text_from_pdf(file.name)
-        chunks = chunk_text(text)
-        for chk in chunks:
-            new_chunks_meta.append((os.path.basename(file.name), chk))
-            new_chunks_text.append(chk)
-        added += len(chunks)
-    
-    if added > 0:
-        # Compute embeddings locally (fast/free)
-        embeddings = EMBEDDER.encode(new_chunks_text, convert_to_tensor=False)
-        new_embs = np.array(embeddings)
-
-        RAG_STORE["chunks"].extend(new_chunks_meta)
-        
-        if RAG_STORE["embeddings"] is None:
-            RAG_STORE["embeddings"] = new_embs
-        else:
-            RAG_STORE["embeddings"] = np.vstack([RAG_STORE["embeddings"], new_embs])
-            
-    return f"✅ Processed {len(files)} files. Total chunks: {len(RAG_STORE['chunks'])}"
 
 def clear_rag():
     RAG_STORE["chunks"].clear()
@@ -130,7 +175,7 @@ def clear_rag():
     return "🗑️ Memory cleared."
 
 def retrieve(query: str, k: int = 4) -> List[str]:
-    if not RAG_STORE["embeddings"] or len(RAG_STORE["chunks"]) == 0:
+    if RAG_STORE["embeddings"] is None or len(RAG_STORE["chunks"]) == 0:
         return []
     
     q_emb = EMBEDDER.encode(query, convert_to_tensor=False)
@@ -274,8 +319,9 @@ with gr.Blocks(css=css, theme=gr.themes.Soft(), title=BRAND_NAME) as demo:
             return history, "Empty message", None, None
             
         # 2. Generate
-        reply, stats = generate(message, history, model, temp, use_rag=(rag_files is not None))
-        
+        use_rag = (rag_files is not None and len(rag_files) > 0)
+        reply, stats = generate(message, history, model, temp, use_rag)
+
         # 3. Update History (Gradio 4.0+ style)
         # history is list of dicts or list of lists. We assume list of tuples here for conversion
         # but Chatbot(type="messages") expects [{"role": "user", "content": "x"}, ...]
